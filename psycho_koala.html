@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>サイコアラ大暴走</title>
+<style>
+  html,body{margin:0;padding:0;background:#1a1a2e;height:100%;overflow:hidden;font-family:"Hiragino Sans","Yu Gothic",sans-serif;}
+  #wrap{display:flex;justify-content:center;align-items:center;height:100%;}
+  canvas{background:#87ceeb;box-shadow:0 0 30px rgba(0,0,0,.6);image-rendering:pixelated;max-width:100vw;max-height:100vh;}
+  #hint{position:fixed;bottom:6px;left:50%;transform:translateX(-50%);color:#eee;font-size:12px;opacity:.7;text-align:center;}
+
+  #topBar{position:fixed;top:0;left:0;width:100%;display:flex;justify-content:flex-end;padding:8px;box-sizing:border-box;z-index:30;pointer-events:none;}
+  #soundToggle{pointer-events:auto;background:rgba(0,0,0,.5);color:#fff;border:1px solid rgba(255,255,255,.4);border-radius:10px;padding:8px 12px;font-size:18px;-webkit-tap-highlight-color:transparent;}
+
+  #touchControls{position:fixed;left:0;bottom:0;width:100%;height:210px;z-index:20;pointer-events:none;display:none;}
+  body.is-touch #touchControls{display:block;}
+  body.is-touch #hint{display:none;}
+  .tbtn{position:absolute;width:62px;height:62px;border-radius:50%;background:rgba(255,255,255,.16);border:2px solid rgba(255,255,255,.45);color:#fff;font-size:24px;display:flex;align-items:center;justify-content:center;pointer-events:auto;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;touch-action:none;}
+  .tbtn:active{background:rgba(255,255,255,.4);}
+  #dpad{position:absolute;left:18px;bottom:18px;width:186px;height:186px;}
+  #btnUp{left:62px;top:0;}
+  #btnDown{left:62px;top:124px;}
+  #btnLeft{left:0;top:62px;}
+  #btnRight{left:124px;top:62px;}
+  #actionButtons{position:absolute;right:18px;bottom:18px;width:186px;height:186px;}
+  #btnAttack{right:0;bottom:70px;width:74px;height:74px;font-size:30px;background:rgba(255,90,90,.28);}
+  #btnConfirm{right:78px;bottom:0;font-size:14px;background:rgba(90,220,140,.28);}
+</style>
+</head>
+<body>
+<div id="topBar"><button id="soundToggle" type="button">🔊</button></div>
+<div id="wrap"><canvas id="c" width="800" height="500"></canvas></div>
+<div id="hint">矢印キー/WASD：移動　スペース：🔨攻撃　Enter：決定・次へ</div>
+<div id="touchControls">
+  <div id="dpad">
+    <div class="tbtn" id="btnUp">▲</div>
+    <div class="tbtn" id="btnDown">▼</div>
+    <div class="tbtn" id="btnLeft">◀</div>
+    <div class="tbtn" id="btnRight">▶</div>
+  </div>
+  <div id="actionButtons">
+    <div class="tbtn" id="btnAttack">🔨</div>
+    <div class="tbtn" id="btnConfirm">決定</div>
+  </div>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// ---------- input ----------
+const keys = {};
+window.addEventListener('keydown', e=>{
+  keys[e.key] = true;
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
+});
+window.addEventListener('keyup', e=> keys[e.key]=false);
+let enterPressedEdge = false;
+window.addEventListener('keydown', e=>{ if(e.key==='Enter') enterPressedEdge = true; });
+let spacePressedEdge = false;
+window.addEventListener('keydown', e=>{ if(e.key===' ') spacePressedEdge = true; });
+
+function left(){ return keys['ArrowLeft']||keys['a']||keys['A']; }
+function right(){ return keys['ArrowRight']||keys['d']||keys['D']; }
+function up(){ return keys['ArrowUp']||keys['w']||keys['W']; }
+function down(){ return keys['ArrowDown']||keys['s']||keys['S']; }
+
+// ---------- touch controls ----------
+const isTouchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints>0;
+if(isTouchDevice) document.body.classList.add('is-touch');
+
+function bindHold(el, keyName){
+  if(!el) return;
+  const on = e=>{ e.preventDefault(); keys[keyName]=true; ensureAudio(); };
+  const off = e=>{ e.preventDefault(); keys[keyName]=false; };
+  el.addEventListener('touchstart', on, {passive:false});
+  el.addEventListener('touchend', off, {passive:false});
+  el.addEventListener('touchcancel', off, {passive:false});
+  // allow mouse too, for testing on desktop
+  el.addEventListener('mousedown', on);
+  el.addEventListener('mouseup', off);
+  el.addEventListener('mouseleave', off);
+}
+function bindTap(el, fn){
+  if(!el) return;
+  const on = e=>{ e.preventDefault(); ensureAudio(); fn(); };
+  el.addEventListener('touchstart', on, {passive:false});
+  el.addEventListener('mousedown', on);
+}
+
+bindHold(document.getElementById('btnUp'), 'ArrowUp');
+bindHold(document.getElementById('btnDown'), 'ArrowDown');
+bindHold(document.getElementById('btnLeft'), 'ArrowLeft');
+bindHold(document.getElementById('btnRight'), 'ArrowRight');
+bindTap(document.getElementById('btnAttack'), ()=>{ spacePressedEdge = true; keys[' ']=true; setTimeout(()=>keys[' ']=false,120); });
+bindTap(document.getElementById('btnConfirm'), ()=>{ enterPressedEdge = true; });
+
+// ---------- helpers ----------
+function rectHit(a,b){
+  return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+}
+function rand(a,b){ return a + Math.random()*(b-a); }
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+
+// ---------- audio engine (Web Audio API / no external files) ----------
+let actx = null;
+let audioMuted = false;
+
+function ensureAudio(){
+  if(!actx){
+    try{ actx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ actx = null; }
+  }
+  if(actx && actx.state==='suspended') actx.resume();
+}
+window.addEventListener('keydown', ensureAudio, {once:true});
+window.addEventListener('touchstart', ensureAudio, {once:true});
+window.addEventListener('mousedown', ensureAudio, {once:true});
+
+function playTone(freq, dur, type, vol, delay){
+  if(!actx || audioMuted) return;
+  type = type||'sine'; vol = vol==null?0.16:vol; delay = delay||0;
+  const t0 = actx.currentTime + delay;
+  const o = actx.createOscillator();
+  const g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t0);
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(vol, t0+0.015);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t0); o.stop(t0+dur+0.05);
+}
+function playNoise(dur, vol, delay){
+  if(!actx || audioMuted) return;
+  vol = vol==null?0.2:vol; delay = delay||0;
+  const t0 = actx.currentTime + delay;
+  const bufferSize = Math.max(1,Math.floor(actx.sampleRate*dur));
+  const buffer = actx.createBuffer(1, bufferSize, actx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for(let i=0;i<bufferSize;i++) data[i] = (Math.random()*2-1)*(1-i/bufferSize);
+  const src = actx.createBufferSource();
+  src.buffer = buffer;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(vol, t0);
+  g.gain.exponentialRampToValueAtTime(0.001, t0+dur);
+  src.connect(g); g.connect(actx.destination);
+  src.start(t0);
+}
+
+function sfxEat(){ playTone(880,0.09,'triangle',0.16); playTone(1320,0.08,'triangle',0.12,0.05); }
+function sfxAttack(){ playNoise(0.1,0.14,0); }
+function sfxBreak(){ playTone(180,0.15,'square',0.2,0); playNoise(0.08,0.12,0.02); }
+function sfxHurt(){ playTone(220,0.18,'sawtooth',0.16,0); playTone(140,0.22,'sawtooth',0.12,0.05); }
+function sfxPotatoThrow(){ playTone(1300,0.2,'sine',0.1,0); }
+function sfxPotatoHit(){ playTone(90,0.3,'square',0.22,0); playNoise(0.15,0.18,0.01); }
+function sfxSelect(){ playTone(660,0.06,'square',0.1,0); }
+function sfxSceneStart(){ playTone(523,0.1,'triangle',0.14,0); playTone(659,0.1,'triangle',0.14,0.08); playTone(784,0.16,'triangle',0.14,0.16); }
+function sfxBossHit(){ playTone(150,0.12,'square',0.2,0); }
+function sfxWin(){ playTone(523,0.12,'triangle',0.18,0); playTone(659,0.12,'triangle',0.18,0.1); playTone(784,0.12,'triangle',0.18,0.2); playTone(1046,0.28,'triangle',0.18,0.32); }
+
+// ---- simple background music (per-scene chiptune loop) ----
+const musicPatterns = {
+  title:        {tempo:480, wave:'triangle', notes:[392,0,494,0,587,0,494,0]},
+  village:      {tempo:260, wave:'triangle', notes:[523,659,784,659,523,659,784,987]},
+  town:         {tempo:190, wave:'square',   notes:[392,392,466,392,349,349,415,349]},
+  boss:         {tempo:150, wave:'sawtooth', notes:[220,220,261,220,196,196,233,196]},
+  broadcast:    {tempo:320, wave:'triangle', notes:[659,784,880,784]},
+  shareholders: {tempo:420, wave:'triangle', notes:[330,392,440,392]},
+  ending:       {tempo:360, wave:'triangle', notes:[523,494,440,392]},
+};
+let musicTimer = null;
+let musicStep = 0;
+let currentMusicScene = null;
+function stopMusic(){ if(musicTimer){ clearInterval(musicTimer); musicTimer=null; } }
+function startMusicFor(sceneName){
+  const pat = musicPatterns[sceneName] || musicPatterns.village;
+  if(currentMusicScene===sceneName && musicTimer) return;
+  stopMusic();
+  currentMusicScene = sceneName;
+  musicStep = 0;
+  musicTimer = setInterval(()=>{
+    if(!audioMuted && actx){
+      const note = pat.notes[musicStep % pat.notes.length];
+      if(note>0) playTone(note, pat.tempo/1000*0.85, pat.wave, 0.06, 0);
+    }
+    musicStep++;
+  }, pat.tempo);
+}
+
+const soundToggleBtn = document.getElementById('soundToggle');
+if(soundToggleBtn){
+  soundToggleBtn.addEventListener('click', ()=>{
+    ensureAudio();
+    audioMuted = !audioMuted;
+    soundToggleBtn.textContent = audioMuted ? '🔇' : '🔊';
+  });
+}
+
+// ---------- player ----------
+const player = {
+  x: 380, y: 380, w: 40, h: 40,
+  speed: 220,
+  facing: 1,
+  hunger: 0,       // 満腹度 0-100
+  score: 0,
+  attacking: 0,    // ms remaining of swing animation
+  cooldown: 0,
+  frozen: 0,       // ms remaining frozen (saya event)
+  hitRegistered: false, // prevents multi-hit within one swing
+};
+
+// ---------- saya interrupt event ----------
+const saya = {
+  active: false,
+  timer: 0,
+  phase: 0,       // 0 slide-in, 1 throw, 2 pause countdown
+  potato: {x:0,y:0,vx:0,vy:0,flying:false},
+};
+
+function triggerSaya(){
+  saya.active = true;
+  saya.timer = 0;
+  saya.phase = 0;
+  player.frozen = 3200;
+  player.hunger = 45;
+}
+
+// ---------- scenes ----------
+let scene = 'title';
+let sceneTimer = 0;
+
+// village
+let villageFood = [];
+const VILLAGE_TARGET = 120;
+
+// town
+let townFood = [];
+let breakables = [];
+const TOWN_TARGET = 300;
+
+// boss
+let bossHP = 100;
+const BOSS_MAX = 100;
+let bossGuards = [];
+let bossShake = 0;
+
+// shareholders dialogue
+const dialogueLines = [
+  ["株主A", "…で、我が社の『ニコ生』事業についてご説明願いたい。"],
+  ["社長", "はい、現在サイコアラによる実地調査（突撃）の結果、放送は無事再開されました。"],
+  ["株主B", "実地調査…？ハンマーで正面玄関を破壊したと聞いておりますが。"],
+  ["社長", "リブランディングです。『ドアノック』の一種とご理解ください。"],
+  ["株主A", "食費の計上額が異常に大きいのですが。"],
+  ["社長", "サイコアラ、里でも街でも大変よく食べておりまして…経費で処理しております。"],
+  ["株主B", "サヤ氏による『干し芋介入』というのは一体？"],
+  ["社長", "暴走抑制システムです。効果は…限定的でした。"],
+  ["株主A", "…満場一致で可決とします。次回もサイコアラに一任、ということで。"],
+  ["社長", "ありがとうございます。それでは『ニコ生』、本日も絶賛放送中です。"],
+];
+let dialogueIndex = 0;
+
+// ---------- spawning ----------
+const FOOD_EMOJI = ["🍙","🍎","🍖","🍞","🍩","🍗","🍇","🍌"];
+function spawnFoodAt(list, minX,maxX,minY,maxY){
+  list.push({
+    x: rand(minX,maxX), y: rand(minY,maxY),
+    w: 28, h: 28,
+    emoji: FOOD_EMOJI[Math.floor(rand(0,FOOD_EMOJI.length))],
+    active: true,
+  });
+}
+function fillVillageFood(){
+  villageFood = [];
+  for(let i=0;i<7;i++) spawnFoodAt(villageFood, 40, W-40, 120, H-80);
+}
+function fillTownFood(){
+  townFood = [];
+  for(let i=0;i<6;i++) spawnFoodAt(townFood, 40, W-40, 120, H-80);
+}
+function fillBreakables(){
+  breakables = [];
+  for(let i=0;i<5;i++){
+    breakables.push({
+      x: rand(60,W-100), y: rand(140,H-100), w:36,h:44,
+      alive:true, emoji:"📦"
+    });
+  }
+}
+function fillBossGuards(){
+  bossGuards = [];
+  for(let i=0;i<3;i++){
+    bossGuards.push({
+      x: rand(80,W-120), y: rand(150,H-100), w:34,h:34,
+      vx: rand(-60,60), vy: rand(-60,60), emoji:"🕴️"
+    });
+  }
+}
+
+// ---------- reset / init per scene ----------
+function enterScene(name){
+  scene = name;
+  sceneTimer = 0;
+  player.x = W/2 - 20; player.y = H-120;
+  if(name==='village'){ fillVillageFood(); }
+  if(name==='town'){ fillTownFood(); fillBreakables(); }
+  if(name==='boss'){ bossHP = BOSS_MAX; fillBossGuards(); }
+  if(name==='shareholders'){ dialogueIndex = 0; }
+  sfxSceneStart();
+  startMusicFor(name);
+}
+
+startMusicFor('title');
+
+// ---------- update ----------
+let lastTime = performance.now();
+function update(dt){
+  sceneTimer += dt;
+
+  if(scene==='title'){
+    if(enterPressedEdge) enterScene('village');
+    return;
+  }
+
+  if(scene==='village' || scene==='town' || scene==='boss'){
+    updatePlayerMovement(dt);
+  }
+
+  if(scene==='village') updateVillage(dt);
+  else if(scene==='town') updateTown(dt);
+  else if(scene==='boss') updateBoss(dt);
+  else if(scene==='broadcast') updateBroadcast(dt);
+  else if(scene==='shareholders') updateShareholders(dt);
+  else if(scene==='ending') updateEnding(dt);
+
+  if(saya.active) updateSaya(dt);
+}
+
+function updatePlayerMovement(dt){
+  if(player.frozen > 0){
+    player.frozen -= dt;
+    return;
+  }
+  let vx=0, vy=0;
+  if(left()){ vx -= 1; player.facing=-1; }
+  if(right()){ vx += 1; player.facing=1; }
+  if(up()) vy -= 1;
+  if(down()) vy += 1;
+  const len = Math.hypot(vx,vy) || 1;
+  player.x += (vx/len) * player.speed * dt/1000;
+  player.y += (vy/len) * player.speed * dt/1000;
+  player.x = clamp(player.x, 10, W-player.w-10);
+  player.y = clamp(player.y, 100, H-player.h-10);
+
+  if(player.cooldown>0) player.cooldown -= dt;
+  if(player.attacking>0) player.attacking -= dt;
+  if(spacePressedEdge && player.cooldown<=0){
+    player.attacking = 220;
+    player.cooldown = 420;
+    player.hitRegistered = false;
+    sfxAttack();
+  }
+}
+
+function eatFoodList(list){
+  for(const f of list){
+    if(!f.active) continue;
+    if(rectHit(player, f)){
+      f.active = false;
+      player.score += 10;
+      sfxEat();
+      player.hunger = clamp(player.hunger + 9, 0, 100);
+      if(player.hunger >= 100 && !saya.active){
+        triggerSaya();
+      }
+    }
+  }
+}
+
+function updateVillage(dt){
+  eatFoodList(villageFood);
+  // respawn eaten food after a short while
+  if(villageFood.every(f=>!f.active)){
+    fillVillageFood();
+  }
+  if(player.score >= VILLAGE_TARGET && sceneTimer > 500){
+    // wait for player to press enter to move on
+    if(enterPressedEdge) enterScene('town');
+  }
+}
+
+function attackHitbox(){
+  const range = 46;
+  return {
+    x: player.facing>0 ? player.x+player.w : player.x-range,
+    y: player.y-6, w: range, h: player.h+12
+  };
+}
+
+function updateTown(dt){
+  eatFoodList(townFood);
+  if(townFood.every(f=>!f.active)) fillTownFood();
+
+  if(player.attacking>0){
+    const hb = attackHitbox();
+    for(const b of breakables){
+      if(b.alive && rectHit(hb,b)){
+        b.alive = false;
+        player.score += 25;
+        sfxBreak();
+      }
+    }
+  }
+  if(breakables.every(b=>!b.alive) && Math.random()<0.01) fillBreakables();
+
+  if(player.score >= TOWN_TARGET && sceneTimer > 500){
+    if(enterPressedEdge) enterScene('boss');
+  }
+}
+
+function updateBoss(dt){
+  bossShake = Math.max(0, bossShake-dt);
+  for(const g of bossGuards){
+    g.x += g.vx*dt/1000; g.y += g.vy*dt/1000;
+    if(g.x<40||g.x>W-80) g.vx*=-1;
+    if(g.y<130||g.y>H-90) g.vy*=-1;
+    if(player.frozen<=0 && rectHit(player,{x:g.x,y:g.y,w:g.w,h:g.h})){
+      player.hunger = clamp(player.hunger-20,0,100);
+      player.x -= (player.facing)*30;
+      sfxHurt();
+    }
+  }
+  if(player.attacking>0 && bossHP>0 && !player.hitRegistered){
+    const hb = attackHitbox();
+    const buildingHitbox = {x: W-140, y:120, w:120, h:H-220};
+    if(rectHit(hb, buildingHitbox)){
+      bossHP = clamp(bossHP-14,0,BOSS_MAX);
+      bossShake = 180;
+      player.hitRegistered = true;
+      sfxBossHit();
+    }
+  }
+  if(bossHP<=0){
+    sfxWin();
+    enterScene('broadcast');
+  }
+}
+
+function updateBroadcast(dt){
+  if(sceneTimer>1600 && enterPressedEdge){
+    enterScene('shareholders');
+  }
+}
+
+function updateShareholders(dt){
+  if(enterPressedEdge){
+    sfxSelect();
+    dialogueIndex++;
+    if(dialogueIndex >= dialogueLines.length){
+      enterScene('ending');
+    }
+  }
+}
+
+function updateEnding(dt){
+  if(enterPressedEdge){
+    player.score = 0; player.hunger = 0;
+    enterScene('village');
+  }
+}
+
+function updateSaya(dt){
+  saya.timer += dt;
+  if(saya.phase===0){
+    if(saya.timer>500){ saya.phase=1; saya.timer=0;
+      saya.potato = {x: W+20, y:180, vx:-620, vy:-40, flying:true};
+      sfxPotatoThrow();
+    }
+  } else if(saya.phase===1){
+    saya.potato.x += saya.potato.vx*dt/1000;
+    saya.potato.vy += 260*dt/1000;
+    saya.potato.y += saya.potato.vy*dt/1000;
+    if(saya.potato.x < player.x || saya.timer>900){
+      saya.phase=2; saya.timer=0;
+      sfxPotatoHit();
+    }
+  } else if(saya.phase===2){
+    if(player.frozen<=0){
+      saya.active=false;
+    }
+  }
+}
+
+// ---------- draw ----------
+function drawBG(colorTop, colorBottom){
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,colorTop); g.addColorStop(1,colorBottom);
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+}
+
+function drawHUD(){
+  ctx.fillStyle="rgba(0,0,0,.45)";
+  ctx.fillRect(0,0,W,60);
+  ctx.fillStyle="#fff";
+  ctx.font="20px sans-serif";
+  ctx.fillText("スコア: "+player.score, 16, 28);
+
+  // hunger bar
+  ctx.fillStyle="#333"; ctx.fillRect(16,38,220,14);
+  const hcol = player.hunger>75 ? "#ff4444" : player.hunger>40 ? "#ffb703":"#4caf50";
+  ctx.fillStyle=hcol; ctx.fillRect(16,38,220*(player.hunger/100),14);
+  ctx.strokeStyle="#fff"; ctx.strokeRect(16,38,220,14);
+  ctx.font="12px sans-serif"; ctx.fillStyle="#fff";
+  ctx.fillText("満腹度", 240,49);
+}
+
+function drawPlayer(){
+  ctx.save();
+  ctx.translate(player.x+player.w/2, player.y+player.h/2);
+  if(player.facing<0) ctx.scale(-1,1);
+  ctx.font = "36px serif";
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.fillText("🐨", 0,4);
+  if(player.attacking>0){
+    ctx.font="26px serif";
+    ctx.fillText("🔨", 30, -6);
+  }
+  ctx.restore();
+}
+
+function drawFoodList(list){
+  ctx.font="26px serif"; ctx.textAlign="center"; ctx.textBaseline="middle";
+  for(const f of list){
+    if(!f.active) continue;
+    ctx.fillText(f.emoji, f.x+f.w/2, f.y+f.h/2);
+  }
+}
+
+function drawTitle(){
+  drawBG("#2b2d42","#8d99ae");
+  ctx.fillStyle="#fff";
+  ctx.textAlign="center";
+  ctx.font="bold 44px sans-serif";
+  ctx.fillText("🐨 サイコアラ大暴走 🔨", W/2, H/2-60);
+  ctx.font="20px sans-serif";
+  ctx.fillText("里で食べ、街で暴れ、海浜幕張の会社に突撃せよ。", W/2, H/2-10);
+  ctx.font="18px sans-serif";
+  if(Math.floor(sceneTimer/500)%2===0){
+    ctx.fillText(isTouchDevice ? "「決定」ボタンでスタート" : "Enter キーでスタート", W/2, H/2+50);
+  }
+  ctx.textAlign="left";
+}
+
+function drawVillage(){
+  drawBG("#a8d5ba","#e8f6ef");
+  ctx.font="16px sans-serif"; ctx.fillStyle="#3a5a40";
+  ctx.textAlign="center";
+  ctx.fillText("🏘️ サイコアラの里 🏘️", W/2, 90);
+  ctx.textAlign="left";
+  drawFoodList(villageFood);
+  drawPlayer();
+  drawHUD();
+  if(player.score >= VILLAGE_TARGET){
+    blinkPrompt("食べ尽くした！"+enterLabel()+"で街へ出発");
+  }
+}
+
+function drawTown(){
+  drawBG("#adb5bd","#f1f3f5");
+  ctx.font="16px sans-serif"; ctx.fillStyle="#495057";
+  ctx.textAlign="center";
+  ctx.fillText("🏙️ 街（ハンマー攻撃可） 🏙️", W/2, 90);
+  ctx.textAlign="left";
+  ctx.font="30px serif"; ctx.textAlign="center"; ctx.textBaseline="middle";
+  for(const b of breakables){
+    if(b.alive) ctx.fillText(b.emoji, b.x+b.w/2, b.y+b.h/2);
+  }
+  ctx.textAlign="left";
+  drawFoodList(townFood);
+  drawPlayer();
+  drawHUD();
+  if(player.score >= TOWN_TARGET){
+    blinkPrompt("十分に暴れた！"+enterLabel()+"で海浜幕張へ出撃");
+  }
+}
+
+function drawBoss(){
+  drawBG("#1d3557","#457b9d");
+  ctx.save();
+  if(bossShake>0){
+    ctx.translate(rand(-4,4), rand(-4,4));
+  }
+  ctx.fillStyle="#6c757d";
+  ctx.fillRect(W-140,120,120,H-220);
+  ctx.font="60px serif"; ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.fillText("🏢", W-80, H/2);
+  ctx.font="14px sans-serif"; ctx.fillStyle="#fff";
+  ctx.fillText("海浜幕張本社", W-80, 105);
+  ctx.restore();
+
+  ctx.font="26px serif";
+  for(const g of bossGuards){
+    ctx.fillText(g.emoji, g.x+g.w/2, g.y+g.h/2);
+  }
+  ctx.textAlign="left";
+
+  drawPlayer();
+  drawHUD();
+
+  // boss HP bar
+  ctx.fillStyle="#222"; ctx.fillRect(W/2-150,70,300,18);
+  ctx.fillStyle="#e63946"; ctx.fillRect(W/2-150,70,300*(bossHP/BOSS_MAX),18);
+  ctx.strokeStyle="#fff"; ctx.strokeRect(W/2-150,70,300,18);
+  ctx.fillStyle="#fff"; ctx.font="14px sans-serif"; ctx.textAlign="center";
+  ctx.fillText("本社 HP", W/2, 65);
+  ctx.textAlign="left";
+}
+
+function drawBroadcast(){
+  drawBG("#0b132b","#1c2541");
+  ctx.fillStyle="#fff"; ctx.textAlign="center";
+  ctx.font="bold 40px sans-serif";
+  ctx.fillText("📡 「ニコ生」放送再開！！ 📡", W/2, H/2-30);
+  ctx.font="20px sans-serif";
+  ctx.fillText("サイコアラの突撃により、配信サーバーが復旧しました。", W/2, H/2+20);
+  if(sceneTimer>1600) blinkPrompt(enterLabel()+"で株主総会へ");
+  ctx.textAlign="left";
+}
+
+function drawShareholders(){
+  drawBG("#3c1361","#621e93");
+  ctx.fillStyle="#fff"; ctx.textAlign="center";
+  ctx.font="bold 26px sans-serif";
+  ctx.fillText("📋 臨時株主総会 📋", W/2, 70);
+
+  ctx.font="60px serif";
+  ctx.fillText("🧑‍💼", W/2, 200);
+
+  const line = dialogueLines[Math.min(dialogueIndex, dialogueLines.length-1)];
+  ctx.fillStyle="#ffe066"; ctx.font="bold 18px sans-serif";
+  ctx.fillText(line[0], W/2, 300);
+  ctx.fillStyle="#fff"; ctx.font="20px sans-serif";
+  wrapText(line[1], W/2, 340, 620, 26);
+
+  blinkPrompt(enterLabel()+"で次へ");
+  ctx.textAlign="left";
+}
+
+function drawEnding(){
+  drawBG("#14213d","#274c77");
+  ctx.fillStyle="#fff"; ctx.textAlign="center";
+  ctx.font="bold 40px sans-serif";
+  ctx.fillText("THE END", W/2, H/2-40);
+  ctx.font="22px sans-serif";
+  ctx.fillText("最終スコア: " + player.score, W/2, H/2+10);
+  blinkPrompt(enterLabel()+"でもう一度里から挑戦");
+  ctx.textAlign="left";
+}
+
+function wrapText(text, x,y,maxWidth,lineHeight){
+  const chars = text.split('');
+  let line = '';
+  let cy = y;
+  for(const ch of chars){
+    const test = line+ch;
+    if(ctx.measureText(test).width > maxWidth){
+      ctx.fillText(line, x, cy);
+      line = ch; cy += lineHeight;
+    } else {
+      line = test;
+    }
+  }
+  ctx.fillText(line, x, cy);
+}
+
+function enterLabel(){ return isTouchDevice ? "「決定」ボタン" : "Enter"; }
+function blinkPrompt(text){
+  if(Math.floor(sceneTimer/450)%2===0){
+    ctx.fillStyle="#fff176"; ctx.font="bold 20px sans-serif"; ctx.textAlign="center";
+    ctx.fillText(text, W/2, H-30);
+    ctx.textAlign="left";
+  }
+}
+
+function drawSayaOverlay(){
+  if(!saya.active) return;
+  ctx.save();
+  ctx.fillStyle="rgba(0,0,0,.35)";
+  ctx.fillRect(0,0,W,H);
+
+  // saya character sliding in from right
+  const sayaX = saya.phase===0 ? W - (sceneEase(saya.timer/500))*160 : W-160;
+  ctx.font="70px serif"; ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.fillText("🙋‍♀️", sayaX, 200);
+  ctx.font="16px sans-serif"; ctx.fillStyle="#fff";
+  ctx.fillText("サヤちゃん", sayaX, 250);
+
+  if(saya.phase>=1 && saya.potato.flying){
+    ctx.font="36px serif";
+    ctx.fillText("🍠", saya.potato.x, saya.potato.y);
+  }
+
+  if(saya.phase===2){
+    ctx.font="bold 48px sans-serif"; ctx.fillStyle="#ffd60a";
+    const secs = Math.max(0, Math.ceil(player.frozen/1000));
+    ctx.fillText("干し芋直撃！一時停止中… " + secs, W/2, H-70);
+  }
+  ctx.restore();
+  ctx.textAlign="left"; ctx.textBaseline="alphabetic";
+}
+function sceneEase(t){ t=clamp(t,0,1); return 1-Math.pow(1-t,3); }
+
+// ---------- main loop ----------
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  if(scene==='title') drawTitle();
+  else if(scene==='village') drawVillage();
+  else if(scene==='town') drawTown();
+  else if(scene==='boss') drawBoss();
+  else if(scene==='broadcast') drawBroadcast();
+  else if(scene==='shareholders') drawShareholders();
+  else if(scene==='ending') drawEnding();
+
+  drawSayaOverlay();
+}
+
+function loop(now){
+  const dt = Math.min(50, now-lastTime);
+  lastTime = now;
+  update(dt);
+  draw();
+  enterPressedEdge = false;
+  spacePressedEdge = false;
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
